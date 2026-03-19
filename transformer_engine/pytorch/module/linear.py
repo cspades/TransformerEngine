@@ -138,6 +138,11 @@ class _Linear(torch.autograd.Function):
         if ub_name is not None:
             nvtx_label = f"{nvtx_label}.{ub_name}"
 
+        # NaN check: _Linear.forward start
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(inp)):
+            breakpoint()
+        torch.distributed.barrier()
+
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
         assert inp.shape[-1] == in_features, "GEMM not possible"
@@ -493,6 +498,11 @@ class _Linear(torch.autograd.Function):
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
 
+        # NaN check: _Linear.forward end
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(out)):
+            breakpoint()
+        torch.distributed.barrier()
+
         return out
 
     @staticmethod
@@ -503,6 +513,11 @@ class _Linear(torch.autograd.Function):
         nvtx_label = "transformer_engine._Linear.backward"
         if ctx.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
+
+        # NaN check: _Linear.backward start
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(grad_output)):
+            breakpoint()
+        torch.distributed.barrier()
 
         with get_nvtx_range_context("_Linear_backward"):
             inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
@@ -973,6 +988,12 @@ class _Linear(torch.autograd.Function):
         # Scatter fp8 weight buffers
         if ctx.fp8 and not isinstance(weight, QuantizedTensorStorage):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
+
+        # NaN check: _Linear.backward end
+        if ctx.requires_dgrad and torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(dgrad)):
+            breakpoint()
+        torch.distributed.barrier()
+
         return (
             wgrad,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,

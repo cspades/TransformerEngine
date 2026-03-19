@@ -854,6 +854,10 @@ class TransformerLayer(torch.nn.Module):
             i.e. :attr:`qkv_format` = ``'thd'``.
         """
 
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(hidden_states)):
+            breakpoint()
+        torch.distributed.barrier()
+
         if self_attn_mask_type is None:
             self_attn_mask_type = self.self_attn_mask_type
         if window_size is None:
@@ -968,6 +972,10 @@ class TransformerLayer(torch.nn.Module):
             pad_between_seqs=pad_between_seqs,
         )
 
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(self_attention_outputs[0])):
+            breakpoint()
+        torch.distributed.barrier()
+
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
             attention_output, attention_bias, residual = self_attention_outputs
             hidden_states = self._bias_dropout_add(
@@ -1017,6 +1025,11 @@ class TransformerLayer(torch.nn.Module):
             hidden_states,
             is_first_microbatch=is_first_microbatch,
         )
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(mlp_outputs[0])):
+            breakpoint()
+        torch.distributed.barrier()
+
         if self.apply_residual_connection_post_layernorm:
             mlp_output, mlp_bias, residual = mlp_outputs
             output = self._bias_dropout_add(mlp_output, mlp_bias, residual, self.drop_path)
@@ -1028,9 +1041,17 @@ class TransformerLayer(torch.nn.Module):
             mlp_output, mlp_bias = mlp_outputs
             output = self._bias_dropout_add(mlp_output, mlp_bias, hidden_states, self.drop_path)
 
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(output)):
+            breakpoint()
+        torch.distributed.barrier()
+
         # For BERT like architectures.
         if self.output_layernorm:
             output = self.layernorm(output)
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(output)):
+            breakpoint()
+        torch.distributed.barrier()
 
         # output: [s, b, h]
         return output

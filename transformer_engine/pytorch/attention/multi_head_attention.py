@@ -843,6 +843,10 @@ class MultiheadAttention(torch.nn.Module):
         """
         # hidden_states: [sq, b, h]
 
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(hidden_states)):
+            breakpoint()
+        torch.distributed.barrier()
+
         if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
         if window_size is None:
@@ -1159,4 +1163,9 @@ class MultiheadAttention(torch.nn.Module):
             outputs += (attention_bias,)
         if self.input_layernorm and self.return_layernorm_output:
             outputs += (layernorm_output,)
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(outputs[0])):
+            breakpoint()
+        torch.distributed.barrier()
+
         return outputs if len(outputs) > 1 else outputs[0]

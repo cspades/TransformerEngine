@@ -1294,6 +1294,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         nvtx_label = "transformer_engine.AttnFuncWithCPAndKVP2P.forward"
         nvtx_range_push(f"{nvtx_label}")
 
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(q)):
+            breakpoint()
+        torch.distributed.barrier()
+
         # set up CP groups for cp_comm_type = {'p2p', 'a2a+p2p'}
         cp_group_a2a = None
         cp_size_a2a = 1
@@ -2040,6 +2044,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         nvtx_range_pop(f"{nvtx_label}")
 
+        if torch.isnan(torch.linalg.norm(out_ret)) and torch.distributed.get_rank() == 0:
+            breakpoint()
+        torch.distributed.barrier()
+
         if return_max_logit:
             return out_ret, max_logit
         return out_ret
@@ -2051,6 +2059,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # add NVTX range
         nvtx_label = "transformer_engine.AttnFuncWithCPAndKVP2P.backward"
         nvtx_range_push(f"{nvtx_label}")
+
+        if torch.isnan(torch.linalg.norm(dout)) and torch.distributed.get_rank() == 0:
+            breakpoint()
+        torch.distributed.barrier()
 
         # dout is expected to be in FP8 if is_output_fp8=True,
         # but in the case it's not, convert it to FP8 before any operation
@@ -2727,6 +2739,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         nvtx_range_pop(f"{nvtx_label}")
 
+        if torch.isnan(torch.linalg.norm(dq)) and torch.distributed.get_rank() == 0:
+            breakpoint()
+        torch.distributed.barrier()
+
         return (
             None,
             dq,
@@ -2822,6 +2838,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(q)):
+            breakpoint()
+        torch.distributed.barrier()
 
         cp_size = get_distributed_world_size(cp_group)
         rank = get_distributed_rank(cp_group)
@@ -3067,6 +3087,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
         if return_max_logit:
             return out, max_logit
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(out)):
+            breakpoint()
+        torch.distributed.barrier()
         return out
 
     @staticmethod
@@ -3075,6 +3099,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(dout)):
+            breakpoint()
+        torch.distributed.barrier()
 
         (*saved_tensors,) = ctx.saved_tensors
         (q, k, v, cu_seqlens_q, cu_seqlens_q_padded) = saved_tensors[:5]
@@ -3272,6 +3300,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         dv = dv.movedim(0, seq_dim).contiguous()
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
 
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(dq)):
+            breakpoint()
+        torch.distributed.barrier()
+
         return (
             None,
             dq,
@@ -3340,6 +3372,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(q)):
+            breakpoint()
+        torch.distributed.barrier()     
 
         cp_size = get_distributed_world_size(cp_group)
 
@@ -3651,6 +3687,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             ctx.S_quantizer = S_quantizer.copy()
             ctx.S_quantizer.scale = S_quantizer.scale.clone()
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(out_ret)):
+            breakpoint()
+        torch.distributed.barrier()
+
         if return_max_logit:
             return out_ret, max_logit
         return out_ret
@@ -3676,6 +3717,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             cu_seqlens_kv_padded,
             *aux_ctx_tensors,
         ) = restore_from_func_ctx(ctx)
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(dout)):
+            breakpoint()
+        torch.distributed.barrier()
 
         qkv_format = ctx.qkv_format
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
@@ -3888,6 +3933,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                         dv,
                         src_nominal_dtype=bwd_nominal_dtype,
                     )
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(dq)):
+            breakpoint()
+        torch.distributed.barrier()
 
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.backward")
 

@@ -402,6 +402,11 @@ class _LayerNormMLP(torch.autograd.Function):
             and not custom
         )
 
+        # NaN check: _LayerNormMLP.forward start
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(inputmat)):
+            breakpoint()
+        torch.distributed.barrier()
+
         # Apply normalization
         ln_out, mu, rsigma = apply_normalization(
             inputmat,
@@ -860,6 +865,11 @@ class _LayerNormMLP(torch.autograd.Function):
                     rsigma,
                 )
 
+        # NaN check: _LayerNormMLP.forward end
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(fc2_out)):
+            breakpoint()
+        torch.distributed.barrier()
+
         # we only get to this point if we are not recomputing for bwd, since that would have returned in the block above
         if return_layernorm_output:
             if return_layernorm_output_gathered:
@@ -1052,6 +1062,11 @@ class _LayerNormMLP(torch.autograd.Function):
             ) = TransformerEngineBaseModule.grad_output_preprocess(
                 ctx, grad_outputs[0], True, ctx.fc2_grad_output_quantizer
             )
+
+            # NaN check: _LayerNormMLP.backward start
+            if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(grad_outputs[0])):
+                breakpoint()
+            torch.distributed.barrier()
 
             # Launch tensor-parallel communication for FC1 GEMM input
             ln_out_total = None
@@ -1575,6 +1590,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.zero_centered_gamma,
                 )
                 dbeta = None
+
         clear_tensor_data(mu, rsigma)
 
         if ctx.fc1_weight_requires_grad:
@@ -1636,6 +1652,12 @@ class _LayerNormMLP(torch.autograd.Function):
         #        fc1_weight_fp8 if not isinstance(fc1_weight, Float8Tensor) else None,
         #        fc2_weight_fp8 if not isinstance(fc2_weight, Float8Tensor) else None,
         #    )
+
+        # NaN check: _LayerNormMLP.backward end
+        if ctx.requires_dgrad and torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(dgrad)):
+            breakpoint()
+        torch.distributed.barrier()
+
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,

@@ -98,6 +98,11 @@ class _GroupedLinear(torch.autograd.Function):
             debug,
         ) = non_tensor_args
 
+        # NaN check: _GroupedLinear.forward start
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(inp)):
+            breakpoint()
+        torch.distributed.barrier()
+
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
@@ -309,12 +314,22 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
 
+        # NaN check: _GroupedLinear.forward end
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(out)):
+            breakpoint()
+        torch.distributed.barrier()
+
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
+        # NaN check: _GroupedLinear.backward start
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(grad_output)):
+            breakpoint()
+        torch.distributed.barrier()
+
         with get_nvtx_range_context("_GroupedLinear_backward"):
             saved_tensors = restore_from_func_ctx(ctx)
             N = ctx.num_gemms
@@ -534,6 +549,12 @@ class _GroupedLinear(torch.autograd.Function):
 
         if ctx.reduce_and_update_bwd_fp8_tensors:
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+
+        # NaN check: _GroupedLinear.backward end
+        if ctx.requires_dgrad and torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(dgrad)):
+            breakpoint()
+        torch.distributed.barrier()
+
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,

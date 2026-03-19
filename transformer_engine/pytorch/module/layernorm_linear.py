@@ -151,6 +151,11 @@ class _LayerNormLinear(torch.autograd.Function):
         if ub_name is not None:
             nvtx_label = f"{nvtx_label}.{ub_name}"
 
+        # NaN check: _LayerNormLinear.forward start
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(inp)):
+            breakpoint()
+        torch.distributed.barrier()
+
         with_input_all_gather = parallel_mode == "column" and sequence_parallel
 
         # Make sure input dimensions are compatible
@@ -531,6 +536,11 @@ class _LayerNormLinear(torch.autograd.Function):
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
 
+        # NaN check: _LayerNormLinear.forward end
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(out)):
+            breakpoint()
+        torch.distributed.barrier()
+
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp_shape)
@@ -549,6 +559,11 @@ class _LayerNormLinear(torch.autograd.Function):
         nvtx_label = "transformer_engine._LayerNormLinear.backward"
         if ctx.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
+
+        # NaN check: _LayerNormLinear.backward start
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(grad_outputs[0])):
+            breakpoint()
+        torch.distributed.barrier()
 
         with get_nvtx_range_context("_LayerNormLinear_backward"):
             (  # pylint: disable=unbalanced-tuple-unpacking
@@ -1018,6 +1033,11 @@ class _LayerNormLinear(torch.autograd.Function):
         # Scatter fp8 weight buffers
         # if ctx.fp8 and not isinstance(weight, QuantizedTensorStorage):
         #    _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
+
+        # NaN check: _LayerNormLinear.backward end
+        if ctx.requires_dgrad and torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(dgrad)):
+            breakpoint()
+        torch.distributed.barrier()
 
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,

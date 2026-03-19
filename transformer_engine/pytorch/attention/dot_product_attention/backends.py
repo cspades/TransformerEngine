@@ -323,6 +323,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
         fp8_output: bool = False,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(query_layer)):
+            breakpoint()
+        torch.distributed.barrier()
+
         assert (
             qkv_layout in QKVLayouts
         ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
@@ -639,6 +643,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
             if fp8_output:
                 context_layer = O_quantizer(context_layer)
 
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(context_layer)):
+            breakpoint()
+        torch.distributed.barrier()
+
         if self.return_max_logit:
             return context_layer, max_logit
 
@@ -657,6 +665,10 @@ class _PrepareQKVForFA(torch.autograd.Function):
         value_layer: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # pylint: disable=missing-function-docstring
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(query_layer)):
+            breakpoint()
+        torch.distributed.barrier()
+
         # All inputs received are non-contiguous tensors.
         # The `query_layer` tensor is used to access the
         # full memory region of the QKV tensor.
@@ -665,6 +677,11 @@ class _PrepareQKVForFA(torch.autograd.Function):
         query_layer = torch.squeeze(q, 0)
         key_layer = torch.squeeze(k, 0)
         value_layer = torch.squeeze(v, 0)
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(query_layer)):
+            breakpoint()
+        torch.distributed.barrier()
+
         return query_layer, key_layer, value_layer
 
     @staticmethod
@@ -675,8 +692,17 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dv: torch.Tensor,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(dq)):
+            breakpoint()
+        torch.distributed.barrier()
+
         dqkv = tex.fa_prepare_bwd(dq, dk, dv)
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(dq)):
+            breakpoint()
+        torch.distributed.barrier()
+
         return dq, dk, dv
 
 
@@ -744,6 +770,9 @@ class FlashAttention(torch.nn.Module):
         num_splits: Optional[int] = 1,
     ) -> torch.Tensor:
         """flash-attn fprop"""
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(query_layer)):
+            breakpoint()
+        torch.distributed.barrier()
 
         assert all(
             x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, Float8Tensor)
@@ -1140,7 +1169,13 @@ class FlashAttention(torch.nn.Module):
             # thd -> t(hd)
             output = output.reshape(output.shape[0], -1)
 
-        return output.contiguous()
+        output = output.contiguous()
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(output)):
+            breakpoint()
+        torch.distributed.barrier()
+
+        return output
 
 
 class FusedAttnFunc(torch.autograd.Function):
@@ -1184,6 +1219,9 @@ class FusedAttnFunc(torch.autograd.Function):
         return_max_logit,
     ):
         # pylint: disable=missing-function-docstring
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(q)):
+            breakpoint()
+        torch.distributed.barrier()
 
         # add NVTX range
         nvtx_label = "transformer_engine.FusedAttnFunc.forward"
@@ -1447,6 +1485,10 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.use_FAv2_bwd = use_FAv2_bwd
         ctx.deterministic = deterministic
 
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(out_ret)):
+            breakpoint()
+        torch.distributed.barrier()
+
         if return_max_logit:
             return out_ret, *max_logit
         return out_ret
@@ -1454,6 +1496,9 @@ class FusedAttnFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, d_out, *_args):
         # pylint: disable=missing-function-docstring
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(d_out)):
+            breakpoint()
+        torch.distributed.barrier()
 
         # d_out is expected to be in FP8 if is_output_fp8=True,
         # but in the case it's not, convert it to FP8 before any operation
@@ -1668,6 +1713,11 @@ class FusedAttnFunc(torch.autograd.Function):
         d_softmax_offset = None
         if ctx.softmax_type != "vanilla":
             d_softmax_offset = rest[1]
+
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(dq)):
+            breakpoint()
+        torch.distributed.barrier()
+
         return (
             None,
             None,
@@ -1813,6 +1863,10 @@ class FusedAttention(torch.nn.Module):
         fp8_output: bool = False,
     ) -> torch.Tensor:
         """fused attention fprop"""
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(query_layer)):
+            breakpoint()
+        torch.distributed.barrier()
+
         assert (
             fused_attention_backend != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
         ), "No fused attention backend supports this input combination!"
@@ -2016,6 +2070,11 @@ class FusedAttention(torch.nn.Module):
                     self.layer_number,
                     self.return_max_logit,
                 )
+
+        out_check = output[0] if self.return_max_logit else output
+        if torch.distributed.get_rank() == 0 and torch.isnan(torch.linalg.norm(out_check)):
+            breakpoint()
+        torch.distributed.barrier()
 
         if self.return_max_logit:
             # ...hd -> ...(hd)
