@@ -180,12 +180,32 @@ def _update_grouped_calibration_metadata_buffers(
             )
 
 
+def _reuses_cached_weight_workspaces(
+    prepared_weights: Union[GroupedTensorStorage, List[torch.Tensor]],
+    weight_workspaces: List[Optional[QuantizedTensorStorage]],
+    update_weight_workspace: bool,
+) -> bool:
+    """Return whether all weights are unchanged cache hits on a non-first microbatch."""
+    if update_weight_workspace or not weight_workspaces:
+        return False
+    weights = (
+        [prepared_weights] if isinstance(prepared_weights, GroupedTensorStorage) else prepared_weights
+    )
+    return len(weights) == len(weight_workspaces) and all(
+        workspace is not None and weight is workspace
+        for weight, workspace in zip(weights, weight_workspaces)
+    )
+
+
 def _calibrate_grouped_tensors(
     input_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
     weight_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
     input_quantizers: List[Optional[Quantizer]],
     weight_quantizers: List[Optional[Quantizer]],
     calibration_config: QuantizationCalibrationConfig,
+    *,
+    calibrate_weights: bool = True,
+    weight_skip_calibration: Optional[torch.Tensor] = None,
 ) -> None:
     """Calibrate GroupedLinear input and weight quantizers once per GEMM."""
     for tensor, quantizer in zip(input_tensors, input_quantizers):
@@ -198,12 +218,15 @@ def _calibrate_grouped_tensors(
         calibration_config,
         transformer_engine_calibration_decay=0.0,
     )
-    for tensor, quantizer in zip(weight_tensors, weight_quantizers):
-        if quantizer is not None:
-            quantizer.calibrate(
-                tensor,
-                calibration_config=weight_calibration_config,
-            )
+    if calibrate_weights:
+        for tensor, quantizer in zip(weight_tensors, weight_quantizers):
+            if quantizer is not None:
+                quantizer.calibrate(
+                    tensor,
+                    calibration_config=weight_calibration_config,
+                    # Skip conditionally for CG replay.
+                    skip_calibration=weight_skip_calibration,
+                )
 
 
 class _GroupedLinear(torch.autograd.Function):
@@ -275,7 +298,7 @@ class _GroupedLinear(torch.autograd.Function):
         with_quantized_compute: bool,
         columnwise_usage: bool,
         activation_dtype: torch.dtype,
-        is_first_microbatch: Optional[bool],
+        update_workspace: bool,
         skip_fp8_weight_update: Optional[torch.Tensor],
         cache_weight: bool,
     ) -> Tuple[
@@ -334,7 +357,6 @@ class _GroupedLinear(torch.autograd.Function):
             if weight.rowwise_data is None:
                 raise RuntimeError("Single grouped weight has no rowwise storage to quantize.")
             source = weight.rowwise_data.view(weight.logical_shape)
-            update_workspace = is_first_microbatch is None or is_first_microbatch
             if workspace is None:
                 if cache_weight:
                     # Match quantize_weight(): persistent workspaces must be Tensor subclasses
@@ -373,7 +395,6 @@ class _GroupedLinear(torch.autograd.Function):
                 new_workspaces,
             )
 
-        update_ws = is_first_microbatch is None or is_first_microbatch
         for idx, weight in enumerate(weights):
             weight_quantizer = weight_quantizers[idx]
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
@@ -381,7 +402,7 @@ class _GroupedLinear(torch.autograd.Function):
                 tensor=weight,
                 quantizer=weight_quantizer,
                 workspace=weight_workspaces[idx] if weight_workspaces else None,
-                update_workspace=update_ws,
+                update_workspace=update_workspace,
                 skip_update_flag=skip_fp8_weight_update,
                 workspace_dtype=activation_dtype,
                 cache=cache_weight,
@@ -546,6 +567,7 @@ class _GroupedLinear(torch.autograd.Function):
             )
 
         columnwise_usage = is_grad_enabled and inp.requires_grad
+        update_ws = is_first_microbatch is None or is_first_microbatch
         weights_for_gemm, new_workspaces = _GroupedLinear._prepare_weights_for_grouped_tensor_gemm(
             weights,
             weight_quantizers,
@@ -555,7 +577,7 @@ class _GroupedLinear(torch.autograd.Function):
             with_quantized_compute=fp8,
             columnwise_usage=columnwise_usage,
             activation_dtype=activation_dtype,
-            is_first_microbatch=is_first_microbatch,
+            update_workspace=update_ws,
             skip_fp8_weight_update=skip_fp8_weight_update,
             # Never cache a gathered copy: the workspace would pin the unsharded weight for
             # the module's lifetime, which is the memory sharding exists to avoid.
@@ -614,12 +636,26 @@ class _GroupedLinear(torch.autograd.Function):
                     grouped_weights = weights_for_gemm.split_into_quantized_tensors()
             else:
                 grouped_weights = weights_for_gemm
+            skip_weight_calibration = (
+                # Not capturing weight calibration in CG.
+                skip_fp8_weight_update is None
+                # Valid quantized weight cache hit.
+                # Non-first ubatch (cached) nor quantizing every step.
+                and _reuses_cached_weight_workspaces(
+                    weights_for_gemm,
+                    weight_workspaces,
+                    update_ws,
+                )
+            )
             _calibrate_grouped_tensors(
                 grouped_inputs,
                 grouped_weights,
                 input_quantizers,
                 weight_quantizers,
                 calibration_config,
+                calibrate_weights=not skip_weight_calibration,
+                # Skip conditionally for CG replay.
+                weight_skip_calibration=skip_fp8_weight_update,
             )
             _update_grouped_calibration_metadata_buffers(
                 calibration_buffers,
@@ -945,9 +981,9 @@ class _GroupedLinear(torch.autograd.Function):
         # Initialize weights
         weights_fp8: list
         new_workspaces = [None] * num_gemms
+        update_ws = is_first_microbatch is None or is_first_microbatch
         if fp8 or debug:
             weights_fp8 = []
-            update_ws = is_first_microbatch is None or is_first_microbatch
             for i in range(num_gemms):
                 weight_fp8, new_workspaces[i] = quantize_weight(
                     tensor=weights[i],
@@ -968,12 +1004,26 @@ class _GroupedLinear(torch.autograd.Function):
         # Calibrate quantizers and buffer their metadata when requested.
         if calibration_buffers is not None and not _is_in_activation_recompute_phase():
             assert calibration_config is not None
+            skip_weight_calibration = (
+                # Not capturing weight calibration in CG.
+                skip_fp8_weight_update is None
+                # Valid quantized weight cache hit.
+                # Non-first ubatch (cached) nor quantizing every step.
+                and _reuses_cached_weight_workspaces(
+                    weights_fp8,
+                    weight_workspaces,
+                    update_ws,
+                )
+            )
             _calibrate_grouped_tensors(
                 inputmats,
                 weights_fp8,
                 input_quantizers,
                 weight_quantizers,
                 calibration_config,
+                calibrate_weights=not skip_weight_calibration,
+                # Skip conditionally for CG replay.
+                weight_skip_calibration=skip_fp8_weight_update,
             )
             _update_grouped_calibration_metadata_buffers(
                 calibration_buffers,
@@ -1203,7 +1253,7 @@ class _GroupedLinear(torch.autograd.Function):
                     with_quantized_compute=ctx.fp8_for_weight_prep,
                     columnwise_usage=True,
                     activation_dtype=ctx.activation_dtype,
-                    is_first_microbatch=None,
+                    update_workspace=True,
                     skip_fp8_weight_update=None,
                     cache_weight=False,
                 )
