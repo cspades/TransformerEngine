@@ -123,8 +123,8 @@ def is_module_grouped_tensor_path_supported(
       required for FP8 block scaling on Hopper.
     * FP32 is unsupported by the cuBLASLt grouped GEMM.
 
-    Runtime-only restrictions such as debug mode, CPU offloading, calibration,
-    output quantization, and backend selection are checked separately by
+    Runtime-only restrictions such as debug mode, CPU offloading, output
+    quantization, and backend selection are checked separately by
     ``GroupedLinear``.
     """
     if dtype not in (torch.bfloat16, torch.float16):
@@ -198,8 +198,14 @@ def _reuses_cached_weight_workspaces(
 
 
 def _calibrate_grouped_tensors(
-    input_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
-    weight_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
+    input_tensors: Union[
+        GroupedTensorStorage,
+        List[Union[torch.Tensor, QuantizedTensorStorage]],
+    ],
+    weight_tensors: Union[
+        GroupedTensorStorage,
+        List[Union[torch.Tensor, QuantizedTensorStorage]],
+    ],
     input_quantizers: List[Optional[Quantizer]],
     weight_quantizers: List[Optional[Quantizer]],
     calibration_config: QuantizationCalibrationConfig,
@@ -208,8 +214,15 @@ def _calibrate_grouped_tensors(
     weight_skip_calibration: Optional[torch.Tensor] = None,
 ) -> None:
     """Calibrate GroupedLinear input and weight quantizers once per GEMM."""
-    for tensor, quantizer in zip(input_tensors, input_quantizers):
-        if quantizer is not None:
+    if isinstance(input_tensors, GroupedTensorStorage):
+        input_tensors.calibrate(
+            input_quantizers,
+            calibration_config=calibration_config,
+        )
+    else:
+        for tensor, quantizer in zip(input_tensors, input_quantizers):
+            if quantizer is None:
+                continue
             quantizer.calibrate(
                 tensor,
                 calibration_config=calibration_config,
@@ -219,8 +232,19 @@ def _calibrate_grouped_tensors(
         transformer_engine_calibration_decay=0.0,
     )
     if calibrate_weights:
-        for tensor, quantizer in zip(weight_tensors, weight_quantizers):
-            if quantizer is not None:
+        if isinstance(weight_tensors, GroupedTensorStorage):
+            # Single Weight Calibration
+            weight_tensors.calibrate(
+                weight_quantizers,
+                calibration_config=weight_calibration_config,
+                # Skip conditionally for CG replay.
+                skip_calibration=weight_skip_calibration,
+            )
+        else:
+            # Discrete Weight Calibration
+            for tensor, quantizer in zip(weight_tensors, weight_quantizers):
+                if quantizer is None:
+                    continue
                 quantizer.calibrate(
                     tensor,
                     calibration_config=weight_calibration_config,
@@ -627,15 +651,6 @@ class _GroupedLinear(torch.autograd.Function):
 
         if calibration_buffers is not None and not _is_in_activation_recompute_phase():
             assert calibration_config is not None
-            grouped_inputs = grouped_x.quantized_tensors
-            if grouped_inputs is None:
-                grouped_inputs = grouped_x.split_into_quantized_tensors()
-            if isinstance(weights_for_gemm, GroupedTensorStorage):
-                grouped_weights = weights_for_gemm.quantized_tensors
-                if grouped_weights is None:
-                    grouped_weights = weights_for_gemm.split_into_quantized_tensors()
-            else:
-                grouped_weights = weights_for_gemm
             skip_weight_calibration = (
                 # Not capturing weight calibration in CG.
                 skip_fp8_weight_update is None
@@ -648,8 +663,8 @@ class _GroupedLinear(torch.autograd.Function):
                 )
             )
             _calibrate_grouped_tensors(
-                grouped_inputs,
-                grouped_weights,
+                grouped_x,
+                weights_for_gemm,
                 input_quantizers,
                 weight_quantizers,
                 calibration_config,
@@ -889,8 +904,7 @@ class _GroupedLinear(torch.autograd.Function):
 
         grouped_tensor_supported = False
         if use_grouped_tensor and not (
-            fp8_calibration
-            or debug
+            debug
             or cpu_offloading
             or any(q is not None for q in output_quantizers)
         ):
